@@ -3,13 +3,17 @@ program read_and_fit
     integer, parameter :: max_rows = 10000
     integer :: i, num_rows, ios
     real(8), allocatable :: x_data(:), y_data(:)
-    real(8) :: x0, gamma, a, chisq_old, chisq_new
+    real(8) :: A, B, C, chisq_old, chisq_new
     real(8), dimension(3) :: delta
     character(len=256) :: line
     character(len=256) :: filename
-    real(8), parameter :: pi = 3.141592653589793
 
-    filename = '/mnt/c/Users/littl/Desktop/data.csv'
+    ! 从命令行获取文件名
+    call get_command_argument(1, filename)
+    if (len_trim(filename) == 0) then
+        print *, 'Error: No filename provided.'
+        stop
+    end if
 
     ! 预先分配内存给数组
     allocate(x_data(max_rows), stat=ios)
@@ -43,8 +47,9 @@ program read_and_fit
             exit
         end if
 
-        ! 从行中提取数据
+       ! 从行中提取数据
         read(line, *) x_data(num_rows), y_data(num_rows)
+        y_data(num_rows) = y_data(num_rows)**2  ! 将第二列数据平方
     end do
 
     ! 关闭文件
@@ -57,53 +62,54 @@ program read_and_fit
     end do
 
     ! 初始化拟合参数
-    x0 = 0.03d0
-    gamma = 0.003d0
-    a = 0.0006d0
+    A = 5E-6
+    B = -0.007
+    C = 3
     chisq_old = 1.0e10
 
     ! 执行拟合
-    call lmfit(x_data, y_data, num_rows, x0, gamma, a, chisq_old)
+    call lmfit(x_data, y_data, num_rows, A, B, C, chisq_old)
 
     ! 输出拟合参数
     print *, 'Fitted parameters:'
-    print *, 'x0 = ', x0
-    print *, 'gamma = ', gamma
-    print *, 'a = ', a
+    print *, 'A = ', A
+    print *, 'B = ', B
+    print *, 'C = ', C
 
 contains
 
-    function lorentzian(x, x0, gamma, a) result(y)
-        real(8), intent(in) :: x, x0, gamma, a
+    function quadratic(x, A, B, C) result(y)
+        real(8), intent(in) :: x, A, B, C
         real(8) :: y
-        y = a / (pi * gamma * (1 + ((x - x0) / gamma)**2))
-    end function lorentzian
+        y = A * x**2 + B * x + C
+    end function quadratic
 
-    subroutine lmfit(x, y, n, x0, gamma, a, chisq_old)
+    subroutine lmfit(x, y, n, A, B, C, chisq_old)
         implicit none
         integer, intent(in) :: n
         real(8), dimension(n), intent(in) :: x, y
-        real(8), intent(inout) :: x0, gamma, a, chisq_old
+        real(8), intent(inout) :: A, B, C, chisq_old
         real(8), dimension(n, 3) :: J
         real(8), dimension(n) :: L, res
         real(8), dimension(3, 3) :: H
         real(8), dimension(3) :: beta, delta
-        real(8) :: lambda, chisq_new, tol
+        real(8) :: lambda, chisq_new, tol, reduction_factor, increase_factor
         integer :: i, max_iter, iter
-
-        lambda = 100000000d0
-        tol = 1.0e-13
+        reduction_factor=0.5
+        increase_factor=2
+        lambda = 100d0
+        tol = 1.0e-14
         max_iter = 1000000
 
         do iter = 1, max_iter
             ! 计算模型值和残差
             do i = 1, n
-                L(i) = lorentzian(x(i), x0, gamma, a)
+                L(i) = quadratic(x(i), A, B, C)
                 res(i) = y(i) - L(i)
             end do
 
             ! 计算雅可比矩阵
-            call jacobian(x, y, n, x0, gamma, a, J)
+            call jacobian(x, y, n, A, B, C, J)
 
             ! 计算海森矩阵和梯度向量
             H = matmul(transpose(J), J) + lambda * generate_identity_matrix(3)
@@ -113,15 +119,15 @@ contains
             call solve_linear_system(H, beta, delta)
 
             ! 更新参数
-            x0 = x0 + delta(1)
-            gamma = gamma + delta(2)
-            a = a + delta(3)
+            A = A + delta(1)
+            B = B + delta(2)
+            C = C + delta(3)
 
             ! 计算新的误差
             chisq_new = sum(res**2)
 
             ! 输出当前参数和误差
-            print *, 'Iteration ', iter, ': x0 = ', x0, ', gamma = ', gamma, ', a = ', a, ', chisq_new = ', chisq_new
+            !print *, 'Iteration ', iter, ': A = ', A, ', B = ', B, ', C = ', C, ', chisq_new = ', chisq_new
 
             ! 检查收敛性
             if (abs(chisq_new - chisq_old) < tol) then
@@ -129,27 +135,33 @@ contains
                 print *, 'chisq_old = ', chisq_old, ' chisq_new = ', chisq_new
                 exit
             end if
+            ! 调整 lambda 
+            if (chisq_new < chisq_old) then 
+                lambda = lambda * reduction_factor 
+            else 
+                lambda = lambda * increase_factor 
+             end if
             chisq_old = chisq_new
         end do
     end subroutine lmfit
 
-    subroutine jacobian(x, y, n, x0, gamma, a, J)
+    subroutine jacobian(x, y, n, A, B, C, J)
         implicit none
         integer, intent(in) :: n
         real(8), dimension(n), intent(in) :: x, y
-        real(8), intent(in) :: x0, gamma, a
+        real(8), intent(in) :: A, B, C
         real(8), dimension(n, 3), intent(out) :: J
         integer :: i
-        real(8) :: L, dL_dx0, dL_dgamma, dL_da
+        real(8) :: L, dL_dA, dL_dB, dL_dC
 
         do i = 1, n
-            L = lorentzian(x(i), x0, gamma, a)
-            dL_dx0 = 2.0d0 * a * (x(i) - x0) / (pi * gamma**3 * (1 + ((x(i) - x0) / gamma)**2)**2)
-            dL_dgamma = -a * (gamma**2 - (x(i) - x0)**2) / (pi * (gamma**2 + (x(i) - x0)**2)**2)
-            dL_da = 1.0d0 / (pi * gamma * (1 + ((x(i) - x0) / gamma)**2))
-            J(i, 1) = dL_dx0
-            J(i, 2) = dL_dgamma
-            J(i, 3) = dL_da
+            L = quadratic(x(i), A, B, C)
+            dL_dA = x(i)**2
+            dL_dB = x(i)
+            dL_dC = 1.0d0
+            J(i, 1) = dL_dA
+            J(i, 2) = dL_dB
+            J(i, 3) = dL_dC
         end do
     end subroutine jacobian
 
@@ -180,4 +192,5 @@ contains
     end function generate_identity_matrix
 
 end program read_and_fit
+
 
